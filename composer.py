@@ -3,7 +3,12 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# API Key configure
+api_key = os.getenv("GEMINI_API_KEY")
+if api_key:
+    genai.configure(api_key=api_key)
+
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 def compose(merchant_ctx, trigger_ctx, customer_ctx=None):
@@ -11,27 +16,21 @@ def compose(merchant_ctx, trigger_ctx, customer_ctx=None):
     trigger = trigger_ctx or {}
     customer = customer_ctx or {}
 
-    identity = merchant.get("identity", {})
-    performance = merchant.get("performance", {})
-    offers = merchant.get("offers", [])
-    category = identity.get("category", "general")
-    business_name = identity.get("name", "your business")
+    # Context values safely extract karna
+    payload = merchant.get("payload", merchant) if isinstance(merchant, dict) else {}
+    identity = payload.get("identity", payload) if isinstance(payload, dict) else {}
+    performance = payload.get("performance", {}) if isinstance(payload, dict) else {}
+    offers = payload.get("offers", []) if isinstance(payload, dict) else {}
 
-    trigger_kind = trigger.get("kind", "general")
-    trigger_data = trigger.get("data", {})
+    category = identity.get("category", "retail") if isinstance(identity, dict) else "retail"
+    business_name = identity.get("name", "your store") if isinstance(identity, dict) else "your store"
 
-    offer_text = ""
-    if offers:
-        o = offers[0]
-        offer_text = f"Current offer: {o.get('title', '')} at {o.get('price', '')}"
+    trigger_kind = trigger.get("kind", "merchant_query") if isinstance(trigger, dict) else "merchant_query"
+    trigger_data = trigger.get("data", trigger) if isinstance(trigger, dict) else trigger
 
-    perf_text = ""
-    if performance:
-        perf_text = f"Recent metrics: {performance}"
-
-    customer_text = ""
-    if customer:
-        customer_text = f"Customer info: {customer}"
+    offer_text = f"Current offer: {offers[0]}" if (isinstance(offers, list) and len(offers) > 0) else ""
+    perf_text = f"Recent metrics: {performance}" if performance else ""
+    customer_text = f"Customer info: {customer}" if customer else ""
 
     prompt = f"""You are Vera, magicpin's AI assistant for merchant growth in India.
 
@@ -44,40 +43,52 @@ Trigger: {trigger_kind} - {trigger_data}
 
 Write ONE short WhatsApp-style message from Vera to this merchant.
 Rules:
-- Be specific: use real numbers, offers, and facts from the context above
-- Match the category tone (clinic=clinical, salon=visual, restaurant=appetizing)
-- Give ONE clear CTA (yes/no action)
+- Be specific, helpful, and natural
+- Use natural Hinglish (Hindi-English mix)
+- Give ONE clear CTA
 - Max 3 sentences
-- Sound like a helpful assistant, not spam
-- Use Hindi-English mix naturally
 
-Also provide:
-- cta: the single action you want merchant to take
-- send_as: "vera" always
-- suppression_key: string like "trigger_type:merchant_id"
-- rationale: one line why this message now
-
-Respond in EXACTLY this format, nothing else:
-MESSAGE: <your message here>
-CTA: <one action>
+Respond in EXACTLY this format:
+MESSAGE: <message>
+CTA: <action>
 SEND_AS: vera
-SUPPRESSION_KEY: <key>
-RATIONALE: <one line>"""
+SUPPRESSION_KEY: trigger:{business_name}
+RATIONALE: Growth recommendation"""
 
-    response = model.generate_content(prompt)
-    text = response.text.strip()
+    # Safe fallback agar Gemini API call fail ho ya empty response aaye
+    default_result = {
+        "message": f"Namaste! Ham aapke store '{business_name}' ke footfall badhane ke liye naye offers plan kar sakte hain.",
+        "cta": "Reply YES to activate",
+        "send_as": "vera",
+        "suppression_key": f"reply:{business_name}",
+        "rationale": "Direct growth assistance"
+    }
 
-    result = {}
-    for line in text.split("\n"):
-        if line.startswith("MESSAGE:"):
-            result["message"] = line.replace("MESSAGE:", "").strip()
-        elif line.startswith("CTA:"):
-            result["cta"] = line.replace("CTA:", "").strip()
-        elif line.startswith("SEND_AS:"):
-            result["send_as"] = line.replace("SEND_AS:", "").strip()
-        elif line.startswith("SUPPRESSION_KEY:"):
-            result["suppression_key"] = line.replace("SUPPRESSION_KEY:", "").strip()
-        elif line.startswith("RATIONALE:"):
-            result["rationale"] = line.replace("RATIONALE:", "").strip()
+    try:
+        response = model.generate_content(prompt)
+        text = response.text.strip() if response and hasattr(response, "text") else ""
 
-    return result 
+        result = {}
+        for raw_line in text.split("\n"):
+            line = raw_line.strip().replace("**", "")  # Bold markdown clean karna
+            if line.upper().startswith("MESSAGE:"):
+                result["message"] = line[len("MESSAGE:"):].strip()
+            elif line.upper().startswith("CTA:"):
+                result["cta"] = line[len("CTA:"):].strip()
+            elif line.upper().startswith("SEND_AS:"):
+                result["send_as"] = line[len("SEND_AS:"):].strip()
+            elif line.upper().startswith("SUPPRESSION_KEY:"):
+                result["suppression_key"] = line[len("SUPPRESSION_KEY:"):].strip()
+            elif line.upper().startswith("RATIONALE:"):
+                result["rationale"] = line[len("RATIONALE:"):].strip()
+
+        # Missing fields ko default se fill karo
+        for key, val in default_result.items():
+            if not result.get(key):
+                result[key] = val
+
+        return result
+
+    except Exception as e:
+        print(f"Error in compose Gemini call: {e}")
+        return default_result
